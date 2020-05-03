@@ -23,6 +23,7 @@ func main() {
 	adminBindAddr := flag.String("admin-listen", "", "Adress the admin server will bind to. Default to localhost, set to 0.0.0.0 to use from another machine")
 	stubPath := flag.String("stub", "", "Path where the stub files are (Optional)")
 	imports := flag.String("imports", "/protobuf", "comma separated imports path. default path /protobuf is where gripmock Dockerfile install WKT protos")
+	replaces := flag.String("replaces", "", "extract comma separated go mod replace (ex: github.com/toto/titi:./titi")
 	// for backwards compatibility
 	if os.Args[1] == "gripmock" {
 		os.Args = append(os.Args[:1], os.Args[2:]...)
@@ -41,9 +42,18 @@ func main() {
 
 	// for safety
 	output += "/"
-	if _, err := os.Stat(output); os.IsNotExist(err) {
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		log.Print("Cleaning...")
+		os.Remove(output + "go.mod")
+		os.Remove(output + "go.sum")
+		os.Remove(output + "server.go")
+		os.Remove(output + "proto.json")
+	} else {
 		os.Mkdir(output, os.ModePerm)
 	}
+
+	// init Go mod
+	goModInit(output, nil)
 
 	// run admin stub server
 	stub.RunStubServer(stub.Options{
@@ -70,6 +80,10 @@ func main() {
 		output:      output,
 		imports:     importDirs,
 	})
+
+	// Fix Go Mod 
+	replaceProjects := strings.Split(*replaces, ",")
+	fixGoMod(output, protoPaths, pgpa, replaceProjects)
 
 	// build the server
 	buildServer(output, protoPaths, pgpa)
@@ -117,6 +131,51 @@ type protocParam struct {
 type goPackageAlias struct {
 	Alias     string
 	GoPackage string
+}
+
+func goModInit(path string, project *string) {
+	args := []string{"mod", "init"}
+	goModInit := exec.Command("go", args...)
+	goModInit.Dir = path
+	goModInit.Stdout = os.Stdout
+	goModInit.Stderr = os.Stderr
+	err := goModInit.Run()
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func fixGoMod(output string, protoPaths []string, pgpa map[string]goPackageAlias, extraReplaces []string) {
+	f, err := os.OpenFile(output + "go.mod", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+	replace := make(map[string]bool, len(pgpa))
+	for _, protoPath := range protoPaths {
+		if gpa, ok := pgpa[getProtoFilename(protoPath)]; ok {
+			if _, rok := replace[gpa.GoPackage]; !rok {
+		    	if _, err := f.WriteString("replace " + gpa.GoPackage + " => ./" + gpa.GoPackage + "\n"); err != nil {
+					log.Fatal(err)
+				}
+				replace[gpa.GoPackage] = true
+				if _, err := os.Stat(output + gpa.GoPackage + "/go.mod"); !os.IsNotExist(err) {
+					os.Remove(output + gpa.GoPackage + "/go.mod")
+					os.Remove(output + gpa.GoPackage + "/go.sum")
+				}
+				goModInit(output + gpa.GoPackage, &gpa.GoPackage)
+				log.Print(gpa.GoPackage)
+			}
+		}
+	}
+	for _, extraReplace := range extraReplaces {
+		if extraReplace != "" {
+			replaceSplit := strings.Split(extraReplace, ":")
+			if _, err := f.WriteString("replace " + replaceSplit[0] + " => " + replaceSplit[1] + "\n"); err != nil {
+				log.Fatal(err)
+			}
+		}		
+	}
 }
 
 func getGoPackageAlias(output string) map[string]goPackageAlias {

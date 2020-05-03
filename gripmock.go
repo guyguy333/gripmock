@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -60,7 +62,7 @@ func main() {
 	importDirs := strings.Split(*imports, ",")
 
 	// generate pb.go and grpc server based on proto
-	generateProtoc(protocParam{
+	pgpa := generateProtoc(protocParam{
 		protoPath:   protoPaths,
 		adminPort:   *adminport,
 		grpcAddress: *grpcBindAddr,
@@ -70,7 +72,7 @@ func main() {
 	})
 
 	// build the server
-	buildServer(output, protoPaths)
+	buildServer(output, protoPaths, pgpa)
 
 	// and run
 	run, runerr := runGrpcServer(output)
@@ -86,10 +88,21 @@ func main() {
 	}
 }
 
-func getProtoName(path string) string {
+func getProtoFilename(path string) string {
 	paths := strings.Split(path, "/")
-	filename := paths[len(paths)-1]
-	return strings.Split(filename, ".")[0]
+	return paths[len(paths)-1]
+}
+
+func getProtoName(path string) string {
+	return strings.Split(getProtoFilename(path), ".")[0]
+}
+
+func getGoProtoPath(path string, pgpa map[string]goPackageAlias, output string) string {
+	protoname := getProtoName(path)
+	if gpa, ok := pgpa[getProtoFilename(path)]; ok {
+	    return output + gpa.GoPackage + "/" + protoname + ".pb.go"
+	}
+	return output + protoname + ".pb.go"
 }
 
 type protocParam struct {
@@ -101,7 +114,25 @@ type protocParam struct {
 	imports     []string
 }
 
-func generateProtoc(param protocParam) {
+type goPackageAlias struct {
+	Alias     string
+	GoPackage string
+}
+
+func getGoPackageAlias(output string) map[string]goPackageAlias {
+	pgpa := make (map[string]goPackageAlias, 1)
+	protoGoPackagesFile, err := ioutil.ReadFile(output + "proto.json")
+	if err != nil {
+		log.Fatal("Unable to open " + output + "proto.json")
+	}
+	err = json.Unmarshal(protoGoPackagesFile, &pgpa)
+	if err != nil {
+		log.Fatal("Unable to unmarshal proto.json")
+	}
+	return pgpa
+}
+
+func generateProtoc(param protocParam) map[string]goPackageAlias {
 	protodirs := strings.Split(param.protoPath[0], "/")
 	protodir := ""
 	if len(protodirs) > 0 {
@@ -125,25 +156,31 @@ func generateProtoc(param protocParam) {
 		log.Fatal("Fail on protoc ", err)
 	}
 
+	pgpa := getGoPackageAlias(param.output)
+
 	// change package to "main" on generated code
-	for _, proto := range param.protoPath {
-		protoname := getProtoName(proto)
-		sed := exec.Command("sed", "-i", `s/^package \w*$/package main/`, param.output+protoname+".pb.go")
+	/* for _, proto := range param.protoPath {
+		goProtoPath := getGoProtoPath(proto, pgpa, param.output)
+		sed := exec.Command("gsed", "-i", `s/^package \w*$/package main/`, goProtoPath)
 		sed.Stderr = os.Stderr
 		sed.Stdout = os.Stdout
 		err = sed.Run()
 		if err != nil {
 			log.Fatal("Fail on sed")
 		}
-	}
+	}*/
+	return pgpa
 }
 
-func buildServer(output string, protoPaths []string) {
+func buildServer(output string, protoPaths []string, pgpa map[string]goPackageAlias) {
 	args := []string{"build", "-o", output + "grpcserver", output + "server.go"}
-	for _, path := range protoPaths {
-		args = append(args, output+getProtoName(path)+".pb.go")
-	}
+	/* for _, path := range protoPaths {
+		goProtoPath := getGoProtoPath(path, pgpa, output)
+		output+getProtoName(path)+".pb.go"
+		args = append(args, goProtoPath)
+	} */
 	build := exec.Command("go", args...)
+	build.Dir = output
 	build.Stdout = os.Stdout
 	build.Stderr = os.Stderr
 	err := build.Run()

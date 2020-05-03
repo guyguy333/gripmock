@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -41,10 +42,29 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to generate server %v", err)
 	}
+
+	pgpa := make (map[string]goPackageAlias, 1)
+	for _, protoFile := range gen.Request.ProtoFile {
+		alias, goPackage := getGoPackage(protoFile)
+		pgpa[protoFile.GetName()] = goPackageAlias{
+			Alias: alias,
+			GoPackage: goPackage,
+		}
+	}
+
+	pgpaJson, err := json.Marshal(pgpa)
+    if err != nil {
+        log.Fatalf("Failed to marshal pgpa %v", err)
+    }
+
 	gen.Response.File = []*plugin_go.CodeGeneratorResponse_File{
 		{
 			Name:    proto.String("server.go"),
 			Content: proto.String(buf.String()),
+		},
+		{
+			Name:    proto.String("proto.json"),
+			Content: proto.String(string(pgpaJson)),
 		},
 	}
 
@@ -58,6 +78,11 @@ func main() {
 	}
 }
 
+type goPackageAlias struct {
+	Alias     string
+	GoPackage string
+}
+
 type generatorParam struct {
 	Services     []Service
 	Dependencies map[string]string
@@ -67,16 +92,18 @@ type generatorParam struct {
 }
 
 type Service struct {
-	Name    string
-	Methods []methodTemplate
+	Name    	  string
+	Methods 	  []methodTemplate
+	PackagePrefix string
 }
 
 type methodTemplate struct {
-	Name        string
-	ServiceName string
-	MethodType  string
-	Input       string
-	Output      string
+	Name          string
+	ServiceName   string
+	MethodType    string
+	Input         string
+	Output        string
+	PackagePrefix string
 }
 
 const (
@@ -147,6 +174,7 @@ func generateServer(protos []*descriptor.FileDescriptorProto, opt *Options) erro
 	}
 
 	_, err = opt.writer.Write(bytProcessed)
+	//_, err = opt.writer.Write(buf.Bytes())
 	return err
 }
 
@@ -158,7 +186,7 @@ func resolveDependencies(protos []*descriptor.FileDescriptorProto) map[string]st
 
 	deps := map[string]string{}
 	aliases := map[string]bool{}
-	aliasNum := 1
+	// aliasNum := 1
 	for _, dep := range depsFile {
 		for _, proto := range protos {
 			alias, pkg := getGoPackage(proto)
@@ -171,8 +199,10 @@ func resolveDependencies(protos []*descriptor.FileDescriptorProto) map[string]st
 
 			// in case of found same alias
 			if ok := aliases[alias]; ok {
-				alias = fmt.Sprintf("%s%d", alias, aliasNum)
-				aliasNum++
+				/*if alias != "." {
+					alias = fmt.Sprintf("%s%d", alias, aliasNum)
+					aliasNum++
+				}*/
 			} else {
 				aliases[alias] = true
 			}
@@ -219,14 +249,22 @@ func extractServices(protos []*descriptor.FileDescriptorProto) []Service {
 				} else if method.GetServerStreaming() && method.GetClientStreaming() {
 					tipe = methodTypeBidirectional
 				}
+				alias, _ := getGoPackage(proto)
+				if alias == "." {
+					alias = ""
+				} else {
+					alias = alias + "."
+				}
 
 				methods[j] = methodTemplate{
-					Name:        strings.Title(*method.Name),
-					ServiceName: svc.GetName(),
-					Input:       getMessageType(protos, proto.GetDependency(), method.GetInputType()),
-					Output:      getMessageType(protos, proto.GetDependency(), method.GetOutputType()),
-					MethodType:  tipe,
+					Name:          strings.Title(*method.Name),
+					ServiceName:   svc.GetName(),
+					Input:         getMessageType(protos, proto.GetDependency(), method.GetInputType()),
+					Output:        getMessageType(protos, proto.GetDependency(), method.GetOutputType()),
+					MethodType:    tipe,
+					PackagePrefix: alias,
 				}
+				s.PackagePrefix = alias
 			}
 			s.Methods = methods
 			svcTmp = append(svcTmp, s)
